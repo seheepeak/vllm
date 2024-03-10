@@ -62,6 +62,9 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
+            # NOTE(sehee): special handling for duplicated bos prepending by both tokenizer and chat template
+            if (bos_id := self.tokenizer.bos_token_id) is not None:
+                (token_ids[:2] == [bos_id, bos_id]) and token_ids.pop(0)
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
