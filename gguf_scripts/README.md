@@ -46,5 +46,5 @@ curl http://192.168.51.3:8000/v1/chat/completions -H "Content-Type: application/
 // enforce_eager==False 인 경우 cuda graph 는 ([bs, 1] for bs in batch_size_capture_list) 의 input shape 에 대해서 각각 생성된다 (ModelRunner.capture_model), 즉 gguf_gemm 에서 bs 에 대한 분기가 있더라도 괜찮음
 // 왜 응답의 퀄리티가 떨어지는 것 처럼 보일까? get_rope 에서 neox_style 을 off 해야한다 (그런데 이게 뭘까?)
 // gguf -> safetensors 로 다시 컨버팅 해야한다 (float32 + q5_k/q6_k)
-- float16 으로 하면 F32 weight 들이 float16 으로 변환되나?
+// float16 으로 하면 F32 weight 들이 float16 으로 변환되나? (dst_tensor.copy_(src_tensor)는 type 변환도 포함한다)
 - rope 가 뭔지 좀 보자, neox style 은 또 뭘까?

@@ -202,14 +202,9 @@ class ColumnParallelLinear(torch.nn.Module):
         param_data = param.data
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
-            if param.numel() == 0:
-                shard_size = loaded_weight.shape[output_dim] // get_tensor_model_parallel_world_size()
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
-        if param.numel() == 0: # lazy shape for gguf
-            param.data = torch.empty_like(loaded_weight, device=param.device)
-            param_data = param.data
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -274,9 +269,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
-                if param.numel() == 0:  # lazy shape for gguf
-                    param.data = torch.empty_like(loaded_weight, device=param.device)
-                    param_data = param.data
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -306,13 +298,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
         if output_dim is not None:
-            if param.numel() == 0: # lazy shape for gguf
-                assert output_dim == 0 and loaded_weight.dim() == 2
-                dequant_shape = getattr(param, "dequant_shape")
-                param_shape = (dequant_shape[0], loaded_weight.shape[1])
-                param.data = torch.empty(param_shape, dtype=loaded_weight.dtype, device=param.device)
-                param_data = param.data
-
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
             # If quantized, we need to adjust the offset and size to account
@@ -409,9 +394,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
-                if param.numel() == 0:  # lazy shape for gguf
-                    param.data = torch.empty_like(loaded_weight, device=param.device)
-                    param_data = param.data
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -443,13 +425,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         tp_rank = get_tensor_model_parallel_rank()
         assert loaded_shard_id in ["q", "k", "v"]
         if output_dim is not None:
-            if param.numel() == 0:
-                assert output_dim == 0 and loaded_weight.dim() == 2
-                dequant_shape = getattr(param, "dequant_shape")
-                param_shape = (dequant_shape[0], loaded_weight.shape[1])
-                param.data = torch.empty(param_shape, dtype=loaded_weight.dtype, device=param.device)
-                param_data = param.data
-
             if loaded_shard_id == "q":
                 shard_offset = 0
                 shard_size = self.num_heads * self.head_size
@@ -529,9 +504,6 @@ class QKParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
-                if param.numel() == 0:  # lazy shape for gguf
-                    param.data = torch.empty_like(loaded_weight, device=param.device)
-                    param_data = param.data
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
@@ -558,13 +530,6 @@ class QKParallelLinear(ColumnParallelLinear):
         tp_rank = get_tensor_model_parallel_rank()
         assert loaded_shard_id in ["q", "k"]
         if output_dim is not None:
-            if param.numel() == 0:
-                assert output_dim == 0 and loaded_weight.dim() == 2
-                dequant_shape = getattr(param, "dequant_shape")
-                param_shape = (dequant_shape[0], loaded_weight.shape[1])
-                param.data = torch.empty(param_shape, dtype=loaded_weight.dtype, device=param.device)
-                param_data = param.data
-
             if loaded_shard_id == "q":
                 shard_offset = 0
                 shard_size = self.num_heads * self.head_size
@@ -674,15 +639,9 @@ class RowParallelLinear(torch.nn.Module):
         param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
-            if param.numel() == 0:
-                assert loaded_weight.shape[input_dim] % get_tensor_model_parallel_world_size() == 0
-                shard_size = loaded_weight.shape[input_dim] // get_tensor_model_parallel_world_size()
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
-        if param.numel() == 0: # lazy shape for gguf
-            param.data = torch.empty_like(loaded_weight, device=param.device)
-            param_data = param.data
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
