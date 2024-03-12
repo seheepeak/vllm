@@ -3,7 +3,7 @@ from pathlib import Path
 from safetensors import safe_open
 from vllm._C import ops
 
-MODEL_PATH = Path.home() / "workspace/hf_models/miqu-1-70b/model.safetensors"
+MODEL_PATH = Path.home() / "workspace/hf_models/miqu-from-gguf/model.safetensors"
 with safe_open(MODEL_PATH, framework="pt", device=0) as f:
     attn_k0: torch.Tensor = f.get_tensor("model.layers.0.self_attn.k_proj.weight")
     print("attn_k0:", attn_k0.shape, attn_k0.dtype, attn_k0.device)
@@ -12,10 +12,10 @@ with safe_open(MODEL_PATH, framework="pt", device=0) as f:
 
 x = torch.ones((1, 8192), dtype=torch.float16).to(attn_k0.device)
 out = ops.gguf_gemm(x, attn_k0)
-print("gguf_gemm(ones, atten_k0):", out.shape, out[0, :64])
+print("gguf_gemm(ones, atten_k0):", out.dtype, out.shape, out[0, :64])
 
 out = ops.gguf_gemm(x, attn_v0)
-print("gguf_gemm(ones, atten_v0):", out.shape, out[0, :64])
+print("gguf_gemm(ones, atten_v0):", out.dtype, out.shape, out[0, :64])
 
 
 # [blk.0.attn_k.weight] ggml_cuda_op_mul_mat_cublas output from llama.cpp
