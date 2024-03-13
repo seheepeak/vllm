@@ -1,14 +1,18 @@
 import argparse
 from typing import List, Tuple
+from pathlib import Path
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
+    summary_prompt_path = Path(__file__).parent / "summary_prompt.txt"
     return [
         ("[INST] What is a large language model? [/INST]", 
-         SamplingParams(temperature=0.0, max_tokens=512))
+         SamplingParams(temperature=0.0, max_tokens=512)),
+        (summary_prompt_path.read_text(), 
+         SamplingParams(temperature=0.0, max_tokens=4096)),
     ]
 
 

@@ -48,3 +48,4 @@ curl http://192.168.51.3:8000/v1/chat/completions -H "Content-Type: application/
 // gguf -> safetensors 로 다시 컨버팅 해야한다 (float32 + q5_k/q6_k)
 // float16 으로 하면 F32 weight 들이 float16 으로 변환되나? (dst_tensor.copy_(src_tensor)는 type 변환도 포함한다)
 - rope 가 뭔지 좀 보자, neox style 은 또 뭘까?
+- 그 무지막지 긴 제롬 파월 인터뷰 요약해보자 prompt stage, generation stage 의 throughput 이 어떤지 확인 필요

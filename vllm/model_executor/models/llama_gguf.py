@@ -89,10 +89,10 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        linear_method: GGUFLinearMethod,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        linear_method: Optional[LinearMethodBase] = None,
         bias: bool = False,
         sliding_window: Optional[int] = None,
     ) -> None:
@@ -127,14 +127,12 @@ class LlamaAttention(nn.Module):
             bias=bias,
             linear_method=linear_method,
         )
-
         self.v_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=self.total_num_kv_heads * self.head_dim,
             bias=bias,
             linear_method=linear_method,
         )
-
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -174,11 +172,10 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: LlamaConfig,
-        linear_method: LinearMethodBase,
+        linear_method: GGUFLinearMethod,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -192,10 +189,10 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
                                  config.num_attention_heads),
+            linear_method=linear_method,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
-            linear_method=linear_method,
             bias=getattr(config, "bias", False),
             sliding_window=sliding_window,
         )
@@ -244,7 +241,7 @@ class LlamaModel(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
-        linear_method: LinearMethodBase,
+        linear_method: GGUFLinearMethod,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
@@ -260,11 +257,14 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
-        # configure quantized weight shape and dtype before creation
+        # NOTE(sehee): LinearMethod.create_weight 에는 weight 의 matrix shape 이 인자로 전달되지만,
+        # GGUF quantized weight 는 matrix shape 이 아닌, quantized shape (m, k//256*block_bytes) 이 필요하다.
+        # 그런데 원본 코드를 가급적 유지한 상태로는 이 block_bytes 를 전달할 방법이 없어서 생성될 linear weight 에 대해서 
+        # 미리 ggml type 을 설정해두고 create_weight 가 호출될 때 이 ggml type stack 에서 block_bytes 를 유추하도록 한다.
         assert isinstance(linear_method, GGUFLinearMethod)
         layers = []
         for i in range(config.num_hidden_layers):
-            linear_method.configure_weights(i)
+            linear_method.configure_weights_of_layer(i)
             layers.append(LlamaDecoderLayer(config, linear_method))
 
         self.layers = nn.ModuleList(layers)
@@ -296,7 +296,7 @@ class LlamaForCausalLM(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
-        linear_method: LinearMethodBase,
+        linear_method: GGUFLinearMethod,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()

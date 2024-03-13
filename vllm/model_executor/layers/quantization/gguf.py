@@ -1,9 +1,7 @@
-import sys
-import enum
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
-from fractions import Fraction
+from typing import Any, Dict, List, Optional
 import re
+from dataclasses import dataclass
+from collections import defaultdict
 
 import torch
 from torch.nn.parameter import Parameter
@@ -13,30 +11,43 @@ from vllm._C import ops
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
+@dataclass
+class LayerGGMLTypes:
+    q_proj: int = 0
+    k_proj: int = 0
+    v_proj: int = 0
+    o_proj: int = 0
+    gate_proj: int = 0
+    up_proj: int = 0
+    down_proj: int = 0
+
+    def is_qk_packed(self) -> bool:
+        return self.q_proj == self.k_proj
+    
+    def is_gate_up_packed(self) -> bool:
+        return self.gate_proj == self.up_proj
+    
+    def get_linear_weights_config(self) -> List[int]:
+        # NOTE(sehee): create_weights 가 호출되는 순서와 list item 의 순서가 일치해야한다
+        if self.is_qk_packed() and self.is_gate_up_packed():
+            # qk, v, o, gate_up, down
+            return [self.q_proj, self.v_proj, self.o_proj, self.gate_proj, self.down_proj]
+        else:
+            raise ValueError(f"Unsupported weight packing: {self}")
+
+
 class GGUFConfig(QuantizationConfig):
-    def __init__(self, ggml_types_per_layer: Dict[str, dict]) -> None:
+    def __init__(self, ggml_types_per_layer: Dict[int, LayerGGMLTypes]) -> None:
         # GGML_TYPE_FLOAT32(0), GGML_TYPE_F16(1), GGML_TYPE_Q5_K(13), GGML_TYPE_Q6_K(14)
         self.ggml_types_per_layer = ggml_types_per_layer
         self.num_layers = max(ggml_types_per_layer.keys()) + 1
-        for i in range(self.num_layers):
-            assert self.is_qkv_packed(i) or self.is_qk_packed(i), "QKV or QK should have same GGML quant type."
-            assert self.is_gate_up_packed(i), "mlp.gate and mlp.up should have same GGML quant type."
+        for ggml_types in self.ggml_types_per_layer.values():
+            assert ggml_types.is_qk_packed(), "QK should have same GGML quant type."
+            assert ggml_types.is_gate_up_packed(), "mlp.gate and mlp.up should have same GGML quant type."
 
-    def get_ggml_types(self, layer: int) -> Dict[str, int]:
+    def get_ggml_types(self, layer: int) -> LayerGGMLTypes:
         assert 0 <= layer < self.num_layers
         return self.ggml_types_per_layer[layer]
-
-    def is_qkv_packed(self, layer: int) -> bool:
-        ggml_types = self.get_ggml_types(layer)
-        return ggml_types['q_proj'] == ggml_types['k_proj'] == ggml_types['v_proj']
-    
-    def is_qk_packed(self, layer: int) -> bool:
-        ggml_types = self.get_ggml_types(layer)
-        return ggml_types['q_proj'] == ggml_types['k_proj'] and ggml_types['v_proj'] != ggml_types['q_proj']
-    
-    def is_gate_up_packed(self, layer: int) -> bool:
-        ggml_types = self.get_ggml_types(layer)
-        return ggml_types['up_proj'] == ggml_types['gate_proj']
 
     def __repr__(self) -> str:
         return (f"GGUFConfig(ggml_types_per_layer={self.ggml_types_per_layer})")
@@ -60,7 +71,7 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
-        ggml_types_per_layer = {}
+        ggml_types_per_layer = defaultdict(LayerGGMLTypes)
         patterns = [(r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight", "q_proj"),
             (r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight", "k_proj"),
             (r"model\.layers\.(\d+)\.self_attn\.v_proj\.weight", "v_proj"),
@@ -72,8 +83,7 @@ class GGUFConfig(QuantizationConfig):
             for p, name in patterns:
                 if m := re.match(p, k):
                     layer = int(m.group(1))
-                    ggml_types_per_layer.setdefault(layer, {})[name] = v
-                    break
+                    setattr(ggml_types_per_layer[layer], name, v)
         return cls(ggml_types_per_layer)
 
     def get_linear_method(self) -> "GGUFLinearMethod":
@@ -91,12 +101,12 @@ class GGUFLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
-        self.weight_type_list = []
+        self.weights_config = []
 
-    def configure_weights(self, layer: int):
-        assert not self.weight_type_list
+    def configure_weights_of_layer(self, layer: int):
+        assert not self.weights_config
         ggml_types = self.quant_config.get_ggml_types(layer)
-        self.weight_type_list = [ggml_types['q_proj'], ggml_types['v_proj'], ggml_types['o_proj'], ggml_types['gate_proj'], ggml_types['down_proj']]
+        self.weights_config = ggml_types.get_linear_weights_config()
 
     def create_weights(
         self,
@@ -106,15 +116,14 @@ class GGUFLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
-        ggml_type = self.weight_type_list.pop(0)
+        ggml_type = self.weights_config.pop(0)
         BYTES_PER_QBLOCK = {13 : 176, 14 : 210}
         if block_bytes := BYTES_PER_QBLOCK.get(ggml_type, 0):
             assert input_size_per_partition % 256 == 0
             input_bytes = input_size_per_partition // 256 * block_bytes
             weight = Parameter(torch.empty(output_size_per_partition, input_bytes, dtype=torch.uint8), requires_grad=False)
         elif ggml_type in [0, 1]:
-            dtype = torch.float32 if ggml_type == 0 else torch.half
-            weight = Parameter(torch.empty(output_size_per_partition, input_size_per_partition, dtype=dtype), requires_grad=False)
+            weight = Parameter(torch.empty(output_size_per_partition, input_size_per_partition, dtype=params_dtype), requires_grad=False)
         else:
             raise ValueError(f"Unsupported weight dtype: {ggml_type}")
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
