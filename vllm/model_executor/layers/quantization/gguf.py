@@ -21,36 +21,48 @@ class LayerGGMLTypes:
     up_proj: int = 0
     down_proj: int = 0
 
-    def is_qk_packed(self) -> bool:
+    def is_qk_same(self) -> bool:
         return self.q_proj == self.k_proj
     
-    def is_gate_up_packed(self) -> bool:
-        return self.gate_proj == self.up_proj
+    def is_qkv_same(self) -> bool:
+        return self.q_proj == self.k_proj == self.v_proj
     
-    def get_linear_weights_config(self) -> List[int]:
-        # NOTE(sehee): create_weights 가 호출되는 순서와 list item 의 순서가 일치해야한다
-        if self.is_qk_packed() and self.is_gate_up_packed():
-            # qk, v, o, gate_up, down
-            return [self.q_proj, self.v_proj, self.o_proj, self.gate_proj, self.down_proj]
-        else:
-            raise ValueError(f"Unsupported weight packing: {self}")
+    def is_gate_up_same(self) -> bool:
+        return self.gate_proj == self.up_proj
 
+# GGML_TYPE_FLOAT32(0), GGML_TYPE_F16(1), GGML_TYPE_Q5_K(13), GGML_TYPE_Q6_K(14)
 
 class GGUFConfig(QuantizationConfig):
-    def __init__(self, ggml_types_per_layer: Dict[int, LayerGGMLTypes]) -> None:
-        # GGML_TYPE_FLOAT32(0), GGML_TYPE_F16(1), GGML_TYPE_Q5_K(13), GGML_TYPE_Q6_K(14)
+    def __init__(self, rope_style: str, ggml_types_per_layer: Dict[int, LayerGGMLTypes]) -> None:
+        assert rope_style in ["neox", "gptj"]
+        self.rope_style = rope_style
         self.ggml_types_per_layer = ggml_types_per_layer
         self.num_layers = max(ggml_types_per_layer.keys()) + 1
-        for ggml_types in self.ggml_types_per_layer.values():
-            assert ggml_types.is_qk_packed(), "QK should have same GGML quant type."
-            assert ggml_types.is_gate_up_packed(), "mlp.gate and mlp.up should have same GGML quant type."
 
-    def get_ggml_types(self, layer: int) -> LayerGGMLTypes:
+        # NOTE(sehee): resolve qkv or qk stacking
+        if all(ggml_types.is_qkv_same() for ggml_types in self.ggml_types_per_layer.values()):
+            self.self_attn_stacking = "qkv"
+        elif all(ggml_types.is_qk_same() for ggml_types in self.ggml_types_per_layer.values()):
+            self.self_attn_stacking = "qk"
+        else:
+            raise ValueError(f"Unsupported self-attention QKV stacking")
+        
+        if not all(ggml_types.is_gate_up_same() for ggml_types in self.ggml_types_per_layer.values()):
+            raise ValueError(f"Unsupported gate and up stacking")
+
+    def get_linear_weights_config(self, layer) -> List[int]:
         assert 0 <= layer < self.num_layers
-        return self.ggml_types_per_layer[layer]
+        ggml_types = self.ggml_types_per_layer[layer]
+        # NOTE(sehee): create_weights 가 호출되는 순서와 list item 의 순서가 일치해야한다
+        if self.self_attn_stacking == "qkv":
+            return [ggml_types.q_proj, ggml_types.o_proj, ggml_types.gate_proj, ggml_types.down_proj]
+        elif self.self_attn_stacking == "qk":
+            return [ggml_types.q_proj, ggml_types.v_proj, ggml_types.o_proj, ggml_types.gate_proj, ggml_types.down_proj]
+        else:
+            raise ValueError(f"Unsupported self-attention QKV stacking mode: {self.self_attn_stacking}")
 
     def __repr__(self) -> str:
-        return (f"GGUFConfig(ggml_types_per_layer={self.ggml_types_per_layer})")
+        return (f"GGUFConfig(rope_style={self.rope_style}, ggml_types_per_layer={self.ggml_types_per_layer})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -71,6 +83,7 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
+        rope_style = config.get("rope_style", "neox")
         ggml_types_per_layer = defaultdict(LayerGGMLTypes)
         patterns = [(r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight", "q_proj"),
             (r"model\.layers\.(\d+)\.self_attn\.k_proj\.weight", "k_proj"),
@@ -84,7 +97,7 @@ class GGUFConfig(QuantizationConfig):
                 if m := re.match(p, k):
                     layer = int(m.group(1))
                     setattr(ggml_types_per_layer[layer], name, v)
-        return cls(ggml_types_per_layer)
+        return cls(rope_style, ggml_types_per_layer)
 
     def get_linear_method(self) -> "GGUFLinearMethod":
         return GGUFLinearMethod(self)
@@ -103,10 +116,9 @@ class GGUFLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.weights_config = []
 
-    def configure_weights_of_layer(self, layer: int):
+    def configure_weights_for_layer(self, layer: int):
         assert not self.weights_config
-        ggml_types = self.quant_config.get_ggml_types(layer)
-        self.weights_config = ggml_types.get_linear_weights_config()
+        self.weights_config = self.quant_config.get_linear_weights_config(layer)
 
     def create_weights(
         self,
