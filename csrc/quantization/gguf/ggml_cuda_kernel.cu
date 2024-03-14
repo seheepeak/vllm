@@ -6,7 +6,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <cuda_bf16.h>
 
 namespace vllm {
 namespace gguf {
@@ -118,22 +117,27 @@ typedef struct
     int8_t qs[QK8_1]; // quants
 } block_q8_1;
 
-template <typename dst_t>
-__device__ dst_t convert_type(float value);
+template <typename src_t, typename dst_t>
+__device__ dst_t convert_type(src_t value);
 
 template <>
-__device__ float convert_type<float>(float value) {
+__device__ float convert_type<float, float>(float value) {
     return value; 
 }
 
 template <>
-__device__ half convert_type<half>(float value) {
-    return __float2half(value);
+__device__ half convert_type<float, half>(float value) {
+    return __float2half(value); 
 }
 
 template <>
-__device__ __nv_bfloat16 convert_type<__nv_bfloat16>(float value) {
-    return __float2bfloat16(value);
+__device__ float convert_type<half, float>(half value) {
+    return __half2float(value);
+}
+
+template <>
+__device__ half convert_type<half, half>(half value) {
+    return value;
 }
 
 static inline __device__ void get_scale_min_k4(int j, const uint8_t *q, uint8_t &d, uint8_t &m)
@@ -180,11 +184,11 @@ static __global__ void dequantize_block_q5_K(const void *__restrict__ vx, dst_t 
     const float m2 = dmin * m;
 
     uint8_t hm = 1 << (2 * il);
-    y[0] = convert_type<dst_t>(d1 * ((ql[0] & 0xF) + (qh[0] & hm ? 16 : 0)) - m1);
-    y[1] = convert_type<dst_t>(d1 * ((ql[1] & 0xF) + (qh[1] & hm ? 16 : 0)) - m1);
+    y[0] = convert_type<float, dst_t>(d1 * ((ql[0] & 0xF) + (qh[0] & hm ? 16 : 0)) - m1);
+    y[1] = convert_type<float, dst_t>(d1 * ((ql[1] & 0xF) + (qh[1] & hm ? 16 : 0)) - m1);
     hm <<= 1;
-    y[32] = convert_type<dst_t>(d2 * ((ql[0] >> 4) + (qh[0] & hm ? 16 : 0)) - m2);
-    y[33] = convert_type<dst_t>(d2 * ((ql[1] >> 4) + (qh[1] & hm ? 16 : 0)) - m2);
+    y[32] = convert_type<float, dst_t>(d2 * ((ql[0] >> 4) + (qh[0] & hm ? 16 : 0)) - m2);
+    y[33] = convert_type<float, dst_t>(d2 * ((ql[1] >> 4) + (qh[1] & hm ? 16 : 0)) - m2);
 }
 
 template <typename dst_t>
@@ -208,10 +212,10 @@ static __global__ void dequantize_block_q6_K(const void *__restrict__ vx, dst_t 
     const uint8_t qh = x[i].qh[32 * ip + il];
     const int8_t *sc = x[i].scales + is;
 
-    y[0] = convert_type<dst_t>(d * sc[0] * ((int8_t)((ql[0] & 0xF) | (((qh >> 0) & 3) << 4)) - 32));
-    y[32] = convert_type<dst_t>(d * sc[2] * ((int8_t)((ql[32] & 0xF) | (((qh >> 2) & 3) << 4)) - 32));
-    y[64] = convert_type<dst_t>(d * sc[4] * ((int8_t)((ql[0] >> 4) | (((qh >> 4) & 3) << 4)) - 32));
-    y[96] = convert_type<dst_t>(d * sc[6] * ((int8_t)((ql[32] >> 4) | (((qh >> 6) & 3) << 4)) - 32));
+    y[0] = convert_type<float, dst_t>(d * sc[0] * ((int8_t)((ql[0] & 0xF) | (((qh >> 0) & 3) << 4)) - 32));
+    y[32] = convert_type<float, dst_t>(d * sc[2] * ((int8_t)((ql[32] & 0xF) | (((qh >> 2) & 3) << 4)) - 32));
+    y[64] = convert_type<float, dst_t>(d * sc[4] * ((int8_t)((ql[0] >> 4) | (((qh >> 4) & 3) << 4)) - 32));
+    y[96] = convert_type<float, dst_t>(d * sc[6] * ((int8_t)((ql[32] >> 4) | (((qh >> 6) & 3) << 4)) - 32));
 }
 
 template <typename dst_t>
@@ -232,7 +236,6 @@ template <typename T>
 using to_t_cuda_t = void (*)(const void *__restrict__ x, T *__restrict__ y, int k, cudaStream_t stream);
 typedef to_t_cuda_t<float> to_fp32_cuda_t;
 typedef to_t_cuda_t<half> to_fp16_cuda_t;
-typedef to_t_cuda_t<__nv_bfloat16> to_bf16_cuda_t;
 to_fp16_cuda_t ggml_get_to_fp16_cuda(int size_k, int quant_bytes_per_row)
 {
     if (size_k % 256 != 0)
@@ -256,7 +259,8 @@ static __device__ __forceinline__ float warp_reduce_sum(float x)
     return x;
 }
 
-static __global__ void quantize_q8_1(const float *__restrict__ x, void *__restrict__ vy, const int kx, const int kx_padded)
+template <typename src_t>
+static __global__ void quantize_q8_1(const src_t *__restrict__ x, void *__restrict__ vy, const int kx, const int kx_padded)
 {
     const int ix = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -274,7 +278,7 @@ static __global__ void quantize_q8_1(const float *__restrict__ x, void *__restri
     const int ib = i_padded / QK8_1;  // block index
     const int iqs = i_padded % QK8_1; // quant index
 
-    const float xi = ix < kx ? x[iy * kx + ix] : 0.0f;
+    const float xi = ix < kx ? convert_type<src_t, float>(x[iy * kx + ix]) : 0.0f;
     float amax = fabsf(xi);
     float sum = xi;
 
@@ -299,7 +303,8 @@ static __global__ void quantize_q8_1(const float *__restrict__ x, void *__restri
     reinterpret_cast<half &>(y[ib].ds.y) = __float2half(sum);
 }
 
-static void quantize_row_q8_1_cuda(const float *x, void *vy, const int kx, const int ky, const int kx_padded, cudaStream_t stream)
+template <typename src_t>
+static void quantize_row_q8_1_cuda(const src_t *x, void *vy, const int kx, const int ky, const int kx_padded, cudaStream_t stream)
 {
     const int block_num_x = (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
     const dim3 num_blocks(block_num_x, ky, 1);
@@ -457,10 +462,10 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1(
 }
 
 typedef float (*vec_dot_q_cuda_t)(const void *__restrict__ vbq, const block_q8_1 *__restrict__ bq8_1, const int &iqs);
-template <int ncols_y, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
+template <typename dst_t, int ncols_y, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda>
 __launch_bounds__((ncols_y <= 4 ? 4 : 2) * WARP_SIZE, 1)
 static __global__ void mul_mat_vec_q(
-    const void *__restrict__ vx, const void *__restrict__ vy, float *__restrict__ dst,
+    const void *__restrict__ vx, const void *__restrict__ vy, dst_t *__restrict__ dst,
     const int ncols_x, const int nrows_x, const int nrows_y, const int nrows_dst)
 {
     constexpr int nwarps = ncols_y <= 4 ? 4 : 2;
@@ -533,15 +538,15 @@ static __global__ void mul_mat_vec_q(
 
         if (threadIdx.x < rows_per_cuda_block)
         {
-            dst[j * nrows_dst + row0 + threadIdx.x] = tmp[j][threadIdx.x];
+            dst[j * nrows_dst + row0 + threadIdx.x] = convert_type<float, dst_t>(tmp[j][threadIdx.x]);
         }
     }
 }
 
 
-template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot>
+template <typename dst_t, int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot>
 static void mul_mat_vec_q_cuda(
-    const void *vx, const void *vy, float *dst,
+    const void *vx, const void *vy, dst_t *dst,
     const int ncols_x, const int nrows_x, const int nrows_y, const int ncols_y, const int nrows_dst, cudaStream_t stream)
 {
     GGML_ASSERT(ncols_x % qk == 0);
@@ -587,35 +592,35 @@ static void mul_mat_vec_q_cuda(
     switch (ncols_y)
     {
     case 1:
-        mul_mat_vec_q<1, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 1, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 2:
-        mul_mat_vec_q<2, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 2, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 3:
-        mul_mat_vec_q<3, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 3, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 4:
-        mul_mat_vec_q<4, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 4, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 5:
-        mul_mat_vec_q<5, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 5, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 6:
-        mul_mat_vec_q<6, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 6, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 7:
-        mul_mat_vec_q<7, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 7, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     case 8:
-        mul_mat_vec_q<8, qk, qi, block_q_t, vdr, vec_dot>
+        mul_mat_vec_q<dst_t, 8, qk, qi, block_q_t, vdr, vec_dot>
             <<<block_nums, block_dims, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
         break;
     default:
@@ -624,11 +629,11 @@ static void mul_mat_vec_q_cuda(
     }
 }
 
-
+template <typename dst_t>
 static void ggml_cuda_op_mul_mat_vec_q(
     int src0_type, // 13: GGML_TYPE_Q5_K, 14: GGML_TYPE_Q6_K
     const int64_t m, const int64_t n, const int64_t k, const int64_t k_padded,
-    const char *src0_dd_i, const char *src1_ddq_i, float *dst_dd_i, 
+    const char *src0_dd_i, const char *src1_ddq_i, dst_t *dst_dd_i, 
     cudaStream_t stream)
 {
     // m: ne01 = weight->ne[1], n: ne11 = input->ne[1], k: ne00 = ne10 = input->ne[0] = weight->ne[0]
@@ -641,10 +646,10 @@ static void ggml_cuda_op_mul_mat_vec_q(
     switch (src0_type)
     {
     case 13: // GGML_TYPE_Q5_K
-        mul_mat_vec_q_cuda<QK_K, QI5_K, block_q5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1>(src0_dd_i, src1_ddq_i, dst_dd_i, k, m, k_padded, n, m, stream);
+        mul_mat_vec_q_cuda<dst_t, QK_K, QI5_K, block_q5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1>(src0_dd_i, src1_ddq_i, dst_dd_i, k, m, k_padded, n, m, stream);
         break;
     case 14: // GGML_TYPE_Q6_K:
-        mul_mat_vec_q_cuda<QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(src0_dd_i, src1_ddq_i, dst_dd_i, k, m, k_padded, n, m, stream);
+        mul_mat_vec_q_cuda<dst_t, QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>(src0_dd_i, src1_ddq_i, dst_dd_i, k, m, k_padded, n, m, stream);
         break;
     default:
         GGML_ASSERT(false);
@@ -702,7 +707,7 @@ torch::Tensor gguf_gemm(torch::Tensor a, torch::Tensor b_weight)
         auto options = torch::TensorOptions().dtype(at::kHalf).device(a.device());
         at::Tensor c = torch::empty({n, m}, options);
         at::Tensor temp_dq = torch::empty({m, k}, options);
-        auto a_half = scalar_type == at::kHalf ? a : a.to(at::kHalf);
+        at::Tensor a_half = a.to(at::kHalf);
 
         vllm::gguf::reconstruct_gemm
         (
@@ -717,17 +722,21 @@ torch::Tensor gguf_gemm(torch::Tensor a, torch::Tensor b_weight)
             b_weight.size(1) // quant_bytes_per_row
         );
 
-        return scalar_type == at::kHalf ? c : c.to(scalar_type);
+        return c.to(scalar_type);
     }
     else {
-        const int64_t k_padded = GGML_PAD(a.size(1), MATRIX_ROW_PADDING);
+        const int64_t k_padded = GGML_PAD(k, MATRIX_ROW_PADDING);
 
-        // quantize input tensor(a) 
+        // quantize input tensor(a) to q8_1
         auto opt_aq = torch::TensorOptions().dtype(at::kByte).device(a.device());
-        at::Tensor aq = torch::empty({a.size(0), k_padded * 36 / 32}, opt_aq);
+        at::Tensor aq = torch::empty({n, k_padded * 36 / 32}, opt_aq);
         const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-        auto a_float = scalar_type == at::kFloat ? a : a.to(at::kFloat);
-        vllm::gguf::quantize_row_q8_1_cuda((const float*)a_float.data_ptr(), aq.data_ptr(), k, n, k_padded, stream);
+        if (scalar_type == at::kFloat)
+            vllm::gguf::quantize_row_q8_1_cuda((const float*)a.data_ptr(), aq.data_ptr(), k, n, k_padded, stream);
+        else if (scalar_type == at::kHalf)
+            vllm::gguf::quantize_row_q8_1_cuda((const half*)a.data_ptr(), aq.data_ptr(), k, n, k_padded, stream);
+        else
+            throw std::runtime_error("Unsupported scalar type");
 
         // src0_type 
         int src0_type = 0;
@@ -737,12 +746,16 @@ torch::Tensor gguf_gemm(torch::Tensor a, torch::Tensor b_weight)
         else if (quant_bytes_per_row == k / 256 * 210)
             src0_type = 14;
         else
-            throw std::runtime_error("Unsupported weight_bytes_per_row");
+            throw std::runtime_error("Unsupported src0 quant type");
 
-        auto opt_c = torch::TensorOptions().dtype(at::kFloat).device(a.device());
+        auto opt_c = torch::TensorOptions().dtype(scalar_type).device(a.device());
         at::Tensor c = torch::empty({n, m}, opt_c);
-
-        vllm::gguf::ggml_cuda_op_mul_mat_vec_q(src0_type, m, n, k, k_padded, (const char*)b_weight.data_ptr(), (const char*)aq.data_ptr(), (float *)c.data_ptr(), stream);
-        return scalar_type == at::kFloat ? c : c.to(scalar_type);
+        if (scalar_type == at::kFloat)
+            vllm::gguf::ggml_cuda_op_mul_mat_vec_q(src0_type, m, n, k, k_padded, (const char*)b_weight.data_ptr(), (const char*)aq.data_ptr(), (float *)c.data_ptr(), stream);
+        else if (scalar_type == at::kHalf)
+            vllm::gguf::ggml_cuda_op_mul_mat_vec_q(src0_type, m, n, k, k_padded, (const char*)b_weight.data_ptr(), (const char*)aq.data_ptr(), (half *)c.data_ptr(), stream);
+        else
+            throw std::runtime_error("Unsupported scalar type");
+        return c;
     }
 }
