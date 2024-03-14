@@ -70,5 +70,4 @@ curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application
 ```
 
 ### TODO
-- tmux 에서 왜 conda activate 이 안될까??? (상관은 없다만서도...)
-- rope 가 뭔지 좀 보자, neox style 은 또 뭘까?
+...
