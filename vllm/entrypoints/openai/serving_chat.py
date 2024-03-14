@@ -1,7 +1,7 @@
 import time
 import codecs
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
+from typing import AsyncGenerator, AsyncIterator, Dict, Optional, List, Union
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -17,6 +17,42 @@ from vllm.model_executor.guided_decoding import (
 
 logger = init_logger(__name__)
 
+def formalize_conversation_messages(messages: List[Dict[str, str]]):
+    if len(messages) == 0:
+        return messages
+    # merge consecutive assistant messages (in case of manipulated self-replies)
+    i = 0
+    while i + 1 < len(messages):
+        msg0, msg1 = messages[i:i + 2]
+        if msg0["role"] == msg1["role"] == "assistant":
+            msg0["content"] = f'{msg0["content"].rstrip()}\n\n{msg1["content"].lstrip()}'
+            messages.pop(i + 1)
+        else:
+            i += 1
+    # from system message to user message + " Understood."
+    # from named user message to user message + " Noted."
+    i = 0
+    while i < len(messages):
+        msg0 = messages[i]
+        if msg0["role"] == "system":
+            msg0["role"] = "user"
+            if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
+                messages.insert(i + 1, {"role": "assistant", "content": " Understood."})
+        elif msg0["role"] == "user":
+            if name := msg0.get("name", ""):
+                name = name.replace("_", " ")
+                msg0["content"] = f"> The message below is from '{name}':\n\n{msg0["content"]}"
+            if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
+                messages.insert(i + 1, {"role": "assistant", "content": " Noted."})
+        i += 1
+    # final message must be from user
+    if messages[-1]["role"] != "user":
+        messages.append({"role": "user", "content": " Anything to comment?"})
+    # starting message must be from user
+    if messages[0]["role"] != "user":
+        messages.insert(0, {"role": "user", "content": " Ok, let's get started."})
+    # from now on, messages = [user, assistant, user, assistant, ..., user]
+    return messages
 
 class OpenAIServingChat(OpenAIServing):
 
@@ -48,10 +84,15 @@ class OpenAIServingChat(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
+        
+        # NOTE(sehee): support for the autogen chat history
+        conversation = formalize_conversation_messages(request.messages)
+        if len(conversation) == 0:
+            return self.create_error_response("Cannot complete an empty conversation.")
+        
         try:
             prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
+                conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt)
         except Exception as e:
