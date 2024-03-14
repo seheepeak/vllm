@@ -1,3 +1,9 @@
+### Run miqu gguf in tensor parallelism
+llama.cpp 로 miqu 를 돌리면 pipeline parallel 만 지원해서 2-GPU 파워를 충분히 쓰지 못한다.
+throughput 을 최대한 끌어올리기 위해, vllm 에 gguf plugin 을 커스텀 구현해서 miqu tensor parallel 을 가능하도록 하자.
+현재는 Q5_K, Q6_K 만 지원한다.
+cuda kernel 은 llama.cpp 의 kernel 코드를 거의 그대로 가져와 구현한다.
+
 ### 빌드 및 설치
 ```bash
 conda create -n vllm python=3.11
