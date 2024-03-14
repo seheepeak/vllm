@@ -41,7 +41,7 @@ def formalize_conversation_messages(messages: List[Dict[str, str]]):
         elif msg0["role"] == "user":
             if name := msg0.get("name", ""):
                 name = name.replace("_", " ")
-                msg0["content"] = f"> The message below is from '{name}':\n\n{msg0["content"]}"
+                msg0["content"] = f"> The message below is from '{name}':\n\n{msg0['content']}"
             if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
                 messages.insert(i + 1, {"role": "assistant", "content": " Noted."})
         i += 1
