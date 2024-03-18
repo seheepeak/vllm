@@ -14,23 +14,34 @@ from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+    
 
 logger = init_logger(__name__)
 
 def formalize_conversation_messages(messages: List[Dict[str, str]]):
+    # remove empty messages
+    messages = [msg for msg in messages if msg["content"].strip()]
     if len(messages) == 0:
         return messages
-    # merge consecutive assistant messages (in case of manipulated self-replies)
+    # merge consecutive messages from same speaker
     i = 0
     while i + 1 < len(messages):
         msg0, msg1 = messages[i:i + 2]
-        if msg0["role"] == msg1["role"] == "assistant":
-            msg0["content"] = f'{msg0["content"].rstrip()}\n\n{msg1["content"].lstrip()}'
-            messages.pop(i + 1)
-        else:
-            i += 1
-    # from system message to user message + " Understood."
-    # from named user message to user message + " Noted."
+        role0, role1 = msg0["role"], msg1["role"]
+        name0, name1 = msg0.get("name", ""), msg1.get("name", "")
+        if (role0 == role1 == "assistant") or (role0 == role1 == "user" and name0 == name1):
+            content0, content1 = msg0["content"], msg1["content"]
+            if content0 in content1: # in case of duplicated or overlapping messages
+                messages.pop(i)
+            elif content1 in content0: # in case of duplicated or overlapping messages
+                messages.pop(i + 1)
+            else:
+                msg0["content"] = content0 + content1 # just concatenate them
+                messages.pop(i + 1)
+            continue
+        i += 1
+    # When it comes to system message, convert it to user message and append " Understood."
+    # When it comes to user message, append " Noted." if next message is not from assistant.
     i = 0
     while i < len(messages):
         msg0 = messages[i]
@@ -45,13 +56,18 @@ def formalize_conversation_messages(messages: List[Dict[str, str]]):
             if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
                 messages.insert(i + 1, {"role": "assistant", "content": " Noted."})
         i += 1
-    # final message must be from user
-    if messages[-1]["role"] != "user":
-        messages.append({"role": "user", "content": " Anything to comment?"})
-    # starting message must be from user
+    # First message must be from user (this should not happen, but just in case)
     if messages[0]["role"] != "user":
         messages.insert(0, {"role": "user", "content": " Ok, let's get started."})
-    # from now on, messages = [user, assistant, user, assistant, ..., user]
+    # Fix the leading/trailing spaces
+    for msg in messages:
+        if msg["role"] == "assistant": # in case of inserted messages forcibly by user
+            if not msg["content"][:1].isspace():
+                msg["content"] = " " + msg["content"]
+        elif msg["role"] == "user": # spaces would be injected by chat-template
+            msg["content"] = msg["content"].strip(" ")
+    # from now on, messages = [user, assistant, user, assistant, ...].
+    # note that final message would be from both user and assistant.
     return messages
 
 class OpenAIServingChat(OpenAIServing):
@@ -105,9 +121,15 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
             sampling_params = request.to_sampling_params()
-            # NOTE(sehee): special handling for duplicated bos prepending by both tokenizer and chat template
+            # NOTE(sehee) Special handling for duplicated bos prepending by both tokenizer and chat template.
             if (bos_id := self.tokenizer.bos_token_id) is not None:
                 (token_ids[:2] == [bos_id, bos_id]) and token_ids.pop(0)
+            # NOTE(sehee) To enable the generation of additional assistant messages, we should omit the EOS token
+            # and incorporate guided_regex to allow for the generation of more than one token
+            if (eos_id := self.tokenizer.eos_token_id) is not None:
+                (token_ids[-1:] == [eos_id]) and token_ids.pop(-1)
+                if not any([request.guided_choice, request.guided_regex, request.guided_json]):
+                    request.guided_regex = r"(?s).+"
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
