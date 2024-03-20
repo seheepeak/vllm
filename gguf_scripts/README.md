@@ -26,8 +26,7 @@ pip install flash-attn --no-build-isolation # flash_attn 을 찾지 못한다고
 python setup.py build_ext --inplace
 # rebuild (ex. upstream/main 과 merge 후)
 pip uninstall vllm; \
-rm -rf .pytest_cache; rm -rf build; rm -rf vllm.egg-info; \
-rm -rf vllm/thirdparty_files; rm vllm/*.so; \
+rm -rf .pytest_cache; rm -rf build; rm -rf vllm.egg-info; rm vllm/*.so; \
 python setup.py develop
 ```
 
