@@ -17,12 +17,12 @@ pip install flash-attn --no-build-isolation # flash_attn 을 찾지 못한다고
 git remote add upstream https://github.com/vllm-project/vllm.git
 # 원본 저장소의 변경 사항을 로컬 시스템으로 가져옵니다
 git fetch upstream
-# gguf 브랜치로 checkout 하고, upstream/main 을 merge
-git checkout gguf ; git merge upstream/main
+# peakim 브랜치로 checkout 하고, upstream/main 을 merge
+git checkout peakim ; git merge upstream/main
 # merge conflict 가 발생한 경우 Resolve using yours
 git checkout upstream/main -- path/to/your/file
 # 최종 commit / push
-git push origin gguf
+git push origin peakim
 ```
 
 ### OAI 서버 실행
