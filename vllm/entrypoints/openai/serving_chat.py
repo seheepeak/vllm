@@ -48,24 +48,17 @@ def formalize_conversation_messages(messages: List[Dict[str, str]]):
         if msg0["role"] == "system":
             msg0["role"] = "user"
             if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
-                messages.insert(i + 1, {"role": "assistant", "content": " Understood."})
+                messages.insert(i + 1, {"role": "assistant", "content": "Understood."})
         elif msg0["role"] == "user":
             if name := msg0.get("name", ""):
                 name = name.replace("_", " ")
                 msg0["content"] = f"> The message below is from '{name}':\n\n{msg0['content']}"
             if i + 1 < len(messages) and messages[i + 1]["role"] != "assistant":
-                messages.insert(i + 1, {"role": "assistant", "content": " Noted."})
+                messages.insert(i + 1, {"role": "assistant", "content": "Noted."})
         i += 1
     # First message must be from user (this should not happen, but just in case)
     if messages[0]["role"] != "user":
-        messages.insert(0, {"role": "user", "content": " Ok, let's get started."})
-    # Fix the leading/trailing spaces
-    for msg in messages:
-        if msg["role"] == "assistant": # in case of inserted messages forcibly by user
-            if not msg["content"][:1].isspace():
-                msg["content"] = " " + msg["content"]
-        elif msg["role"] == "user": # spaces would be injected by chat-template
-            msg["content"] = msg["content"].strip(" ")
+        messages.insert(0, {"role": "user", "content": "Ok, let's get started."})
     # from now on, messages = [user, assistant, user, assistant, ...].
     # note that final message would be from both user and assistant.
     return messages

@@ -338,12 +338,12 @@ class CohereForCausalLM(nn.Module):
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
                 else:
-                    assert loaded_weight.count_nonzero().item() == 0
+                    assert name.endswith(".bias") and loaded_weight.count_nonzero().item() == 0
                 break
             else:
                 if (param := params_dict.get(name, None)) is not None:
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
                 else:
-                    assert loaded_weight.count_nonzero().item() == 0
+                    assert name.endswith(".bias") and loaded_weight.count_nonzero().item() == 0
             loaded_params.add(name)
