@@ -139,10 +139,6 @@ void moe_align_block_size(
   torch::Tensor experts_ids,
   torch::Tensor num_tokens_post_pad);
 
-torch::Tensor gguf_gemm(
-  torch::Tensor a, 
-  torch::Tensor b_weight);
-
 #ifndef USE_ROCM
 using fptr_t = uint64_t;
 fptr_t init_custom_ar(torch::Tensor &meta, torch::Tensor &rank_data,

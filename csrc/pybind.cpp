@@ -75,7 +75,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "moe_align_block_size",
     &moe_align_block_size,
     "Aligning the number of tokens to be processed by each expert such that it is divisible by the block size.");
-  ops.def("gguf_gemm", &gguf_gemm, "Quantized GEMM for GGUF k-quants weight");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");

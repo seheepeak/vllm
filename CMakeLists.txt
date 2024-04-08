@@ -167,7 +167,6 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
-  "csrc/quantization/gguf/ggml_cuda_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/pybind.cpp")

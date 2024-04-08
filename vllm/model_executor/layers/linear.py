@@ -363,7 +363,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         linear_method: Optional[LinearMethodBase] = None,
-        with_v_proj: bool = True,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -382,7 +381,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = (self.num_heads + self.num_kv_heads + (with_v_proj and self.num_kv_heads or 0)) * tp_size * self.head_size
+        output_size = (self.num_heads +
+                       2 * self.num_kv_heads) * tp_size * self.head_size
         super().__init__(input_size, output_size, bias, False, skip_bias_add,
                          params_dtype, linear_method)
 

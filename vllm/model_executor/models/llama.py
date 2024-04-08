@@ -32,15 +32,10 @@ from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-<<<<<<< HEAD
-from vllm.model_executor.layers.quantization.gguf import GGUFLinearMethod
-=======
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
->>>>>>> upstream/main
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -121,44 +116,7 @@ class LlamaAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.qkv_proj = self.qk_proj = self.v_proj = None
 
-<<<<<<< HEAD
-        # NOTE(sehee): GGUF의 경우, qk/v 의 quantization type 이 다를 수 있다.
-        # 또한 rope style 도 기본값 neox style 가 아닐 수 있다.
-        self_attn_stacking = "qkv"
-        is_rope_neox_style = True
-        if isinstance(linear_method, GGUFLinearMethod):
-            self_attn_stacking = linear_method.quant_config.self_attn_stacking
-            is_rope_neox_style = linear_method.quant_config.rope_style == "neox"
-
-        assert self_attn_stacking in ["qkv", "qk"]
-        if self_attn_stacking == "qkv":
-            self.qkv_proj = QKVParallelLinear(
-                hidden_size,
-                self.head_dim,
-                self.total_num_heads,
-                self.total_num_kv_heads,
-                bias=bias,
-                linear_method=linear_method,
-            )
-        else:
-            self.qk_proj = QKVParallelLinear(
-                hidden_size,
-                self.head_dim,
-                self.total_num_heads,
-                self.total_num_kv_heads,
-                bias=bias,
-                linear_method=linear_method,
-                with_v_proj=False,
-            )
-            self.v_proj = ColumnParallelLinear(
-                input_size=hidden_size,
-                output_size=self.total_num_kv_heads * self.head_dim,
-                bias=bias,
-                linear_method=linear_method,
-            )
-=======
         # This will be overwritten by model initialization if we are using it.
         # N.B. currently we only support per tensor scalar scaling factors
         # & only applicable to ROCm (AMD GPU).
@@ -176,7 +134,6 @@ class LlamaAttention(nn.Module):
             bias=bias,
             linear_method=linear_method,
         )
->>>>>>> upstream/main
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -190,7 +147,6 @@ class LlamaAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=is_rope_neox_style,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -205,13 +161,8 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if self.qkv_proj is not None:
-            qkv, _ = self.qkv_proj(hidden_states)
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        else:
-            qk, _ = self.qk_proj(hidden_states)
-            q, k = qk.split([self.q_size, self.kv_size], dim=-1)
-            v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                 self.kv_scale)
@@ -305,16 +256,10 @@ class LlamaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        # NOTE(sehee): LinearMethod.create_weight 에는 weight 의 matrix shape 이 인자로 전달되지만,
-        # GGUF quantized weight 는 matrix shape 이 아닌, quantized shape (m, k//256*block_bytes) 이 필요하다.
-        # 이 quant shape 을 전달하기 위해 생성될 linear weight 에 대해서 미리 해당 decoder layer 의 ggml type 을 설정해두고 
-        # create_weight 가 호출될 때 이 ggml type stack 에서 quantized shape 을 유추하도록 한다.
-        layers = []
-        for i in range(config.num_hidden_layers):
-            if isinstance(linear_method, GGUFLinearMethod):
-                linear_method.configure_weights_for_layer(i)
-            layers.append(LlamaDecoderLayer(config, linear_method))
-        self.layers = nn.ModuleList(layers)
+        self.layers = nn.ModuleList([
+            LlamaDecoderLayer(config, linear_method)
+            for _ in range(config.num_hidden_layers)
+        ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -432,21 +377,13 @@ class LlamaForCausalLM(nn.Module):
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
                      revision: Optional[str] = None):
-        # NOTE(sehee): GGUF 의 경우, qk 와 v 가 다른 quantization type 인 경우가 있어서, 
-        # 어떤 방식으로 stacking 할지 quant config 를 통해 얻어와야 한다. ('qkv' or 'qk')
-        self_attn_stacking = "qkv"
-        if isinstance(self.linear_method, GGUFLinearMethod):
-            self_attn_stacking = self.linear_method.quant_config.self_attn_stacking
-            if self_attn_stacking != "qkv":
-                self.packed_modules_mapping = {}
-                self.supported_lora_modules = []
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (f"{self_attn_stacking}_proj", f"{x}_proj", x) for x in self_attn_stacking
-        ]
-        stacked_params_mapping += [
-            ("gate_up_proj", "gate_proj", 0), 
-            ("gate_up_proj", "up_proj", 1)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
