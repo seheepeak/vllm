@@ -30,9 +30,13 @@ git push origin peakim
 ~/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
 --port 35865 --model ~/workspace/hf_models/c4ai-command-r-plus-gptq \
 --served-model-name cmdr --tensor-parallel-size 2 --max-num-seqs 1 \
---gpu-memory-utilization 0.98 --max-model-len 32768 --enforce-eager
+--gpu-memory-utilization 0.95 --max-model-len 32768 --enforce-eager
 
-curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "cmdr", "messages": [{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
+# system + user
+curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "cmdr", "messages": [{"role": "system", "content": "You are Command-R, a brilliant, sophisticated, AI-assistant trained to assist human users by providing thorough responses. You are trained by Cohere."},{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
+
+# user + assistant (prefill)
+curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "cmdr", "messages": [{"role": "user", "content": "What is a large language model?"},{"role": "assistant", "content": "The modern neural"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
 ```
 
 ### TODO
