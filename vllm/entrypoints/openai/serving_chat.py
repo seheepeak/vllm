@@ -3,6 +3,7 @@ import time
 from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional, Union
 
 from fastapi import Request
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
@@ -58,6 +59,7 @@ def formalize_conversation_messages(messages: List[Dict[str, str]]):
         messages.pop(-1)
     return messages, prefill
 
+
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
@@ -88,13 +90,15 @@ class OpenAIServingChat(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        
+
         # NOTE(sehee): support for the autogen chat history
         conversation, prefill = formalize_conversation_messages(request.messages)
         if len(conversation) == 0:
             return self.create_error_response("Cannot complete an empty conversation.")
-        
+
         try:
+            if not request.add_generation_prompt and prefill:
+                raise ValueError("Cannot use 'prefill' without 'add_generation_prompt'.")
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
@@ -108,10 +112,9 @@ class OpenAIServingChat(OpenAIServing):
         try:
             token_ids = self._validate_prompt_and_tokenize(request,
                                                            prompt=prompt)
-            sampling_params = request.to_sampling_params()
             # NOTE(sehee) Special handling for duplicated bos prepending by both tokenizer and chat template.
-            if token_ids[:2] == [self.tokenizer.bos_token_id] * 2:
-                token_ids.pop(0)
+            (token_ids[:2] == [self.tokenizer.bos_token_id] * 2) and token_ids.pop(0)
+            sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
