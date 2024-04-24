@@ -64,12 +64,12 @@ class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRA]] = None,
                  chat_template=None):
         super().__init__(engine=engine,
-                         served_model=served_model,
+                         served_model_names=served_model_names,
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
@@ -90,7 +90,7 @@ class OpenAIServingChat(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
+        
         # NOTE(sehee): support for the autogen chat history
         conversation, prefill = formalize_conversation_messages(request.messages)
         if len(conversation) == 0:
@@ -110,15 +110,20 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            # Tokenize/detokenize depending on prompt format (string/token list)
+            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
+                request, prompt=prompt)
             # NOTE(sehee) Special handling for duplicated bos prepending by both tokenizer and chat template.
-            (token_ids[:2] == [self.tokenizer.bos_token_id] * 2) and token_ids.pop(0)
+            (prompt_ids[:2] == [self.tokenizer.bos_token_id] * 2) and prompt_ids.pop(0)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            decoding_config = self.engine.engine.decoding_config
+            guided_decoding_backend = request.guided_decoding_backend \
+                or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
-                    request, await self.engine.get_tokenizer()))
+                    guided_decoding_backend, request, await
+                    self.engine.get_tokenizer()))
             if guided_decode_logits_processor:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []
@@ -127,8 +132,8 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
+        result_generator = self.engine.generate(prompt_text, sampling_params,
+                                                request_id, prompt_ids,
                                                 lora_request)
         # Streaming response
         if request.stream:
@@ -153,18 +158,18 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
-        model_name = request.model
+        model_name = self.served_model_names[0]
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
 
         # Send response for each token for each request.n (index)
+        assert request.n is not None
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
         try:
             async for res in result_generator:
-                res: RequestOutput
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
@@ -295,7 +300,7 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput],
             request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = request.model
+        model_name = self.served_model_names[0]
         created_time = int(time.time())
         final_res: RequestOutput = None
 
@@ -363,23 +368,30 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _load_chat_template(self, chat_template):
+        tokenizer = self.tokenizer
+
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
-                    self.tokenizer.chat_template = f.read()
-            except OSError:
+                    tokenizer.chat_template = f.read()
+            except OSError as e:
+                JINJA_CHARS = "{}\n"
+                if not any(c in chat_template for c in JINJA_CHARS):
+                    msg = (f"The supplied chat template ({chat_template}) "
+                           f"looks like a file path, but it failed to be "
+                           f"opened. Reason: {e}")
+                    raise ValueError(msg) from e
+
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
-                self.tokenizer.chat_template = codecs.decode(
+                tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
 
             logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
-            )
-        elif self.tokenizer.chat_template is not None:
+                f"Using supplied chat template:\n{tokenizer.chat_template}")
+        elif tokenizer.chat_template is not None:
             logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
-            )
+                f"Using default chat template:\n{tokenizer.chat_template}")
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
