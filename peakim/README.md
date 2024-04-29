@@ -28,12 +28,12 @@ git push origin peakim
 ### OAI 서버 실행
 ```bash
 ~/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
---port 35865 --model ~/workspace/hf_models/Meta-Llama-3-70B-Instruct-GPTQ-Int8 \
+--port 35865 --model ~/workspace/hf_models/Meta-Llama-3-70B-Instruct-GPTQ-8Bit \
 --served-model-name llama3 --tensor-parallel-size 2 --max-num-seqs 1 \
 --gpu-memory-utilization 0.95 --enforce-eager
 
 # system + user
-curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "llama3", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
+curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "llama3", "messages": [{"role": "system", "content": "You are a helpful AI assistant."},{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
 
 # user + assistant (prefill)
 curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "llama3", "messages": [{"role": "user", "content": "What is a large language model?"},{"role": "assistant", "content": "The modern neural"}], "temperature": 0.0, "stream": false, "max_tokens": 256}'
