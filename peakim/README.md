@@ -28,20 +28,20 @@ git push origin peakim
 ### OAI 서버 실행
 ```bash
 MODEL_PATH="$HOME/workspace/hf_models/c4ai-command-r-plus-gptq"
-SERVED_MODEL_NAME=cmdr
+MODEL_NAME=cmdr
 MODEL_PATH="$HOME/workspace/hf_models/Meta-Llama-3-70B-Instruct-GPTQ-8Bit"
-SERVED_MODEL_NAME=llama3
+MODEL_NAME=llama3
 
 ~/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
 --port 35865 --model $MODEL_PATH \
---served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 2 --max-num-seqs 1 \
+--served-model-name $MODEL_NAME l3m --tensor-parallel-size 2 --max-num-seqs 1 \
 --gpu-memory-utilization 0.95 --enforce-eager
 
 # system + user
-curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "cmdr", "messages": [{"role": "system", "content": "You are a helpful AI assistant."},{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 512}'
+curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "l3m", "messages": [{"role": "system", "content": "You are a helpful AI assistant."},{"role": "user", "content": "What is a large language model?"}], "temperature": 0.0, "stream": false, "max_tokens": 512}'
 
 # user + assistant (prefill)
-curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "cmdr", "messages": [{"role": "user", "content": "What is a large language model?"},{"role": "assistant", "content": "The modern neural"}], "temperature": 0.0, "stream": false, "max_tokens": 512}'
+curl http://192.168.51.3:35865/v1/chat/completions -H "Content-Type: application/json" -d '{ "model": "l3m", "messages": [{"role": "user", "content": "What is a large language model?"},{"role": "assistant", "content": "The modern neural"}], "temperature": 0.0, "stream": false, "max_tokens": 512}'
 ```
 
 ### TODO
