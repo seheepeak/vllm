@@ -36,8 +36,8 @@ def formalize_conversation_messages(messages: List[Dict[str, str]]):
                 messages.pop(i)
             elif content1 in content0: # in case of duplicated or overlapping messages
                 messages.pop(i + 1)
-            else:
-                msg0["content"] = content0 + content1 # just concatenate them
+            else: # concatenate them
+                msg0["content"] = content0.rstrip("\n") + "\n\n" + content1.lstrip("\n") 
                 messages.pop(i + 1)
             continue
         i += 1
